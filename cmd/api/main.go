@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
+	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
 
@@ -22,10 +25,39 @@ func main() {
 	}
 	defer db.Close()
 
-	// Initialize layers
+	// optional: ensure DB is reachable early
+	if err := db.Ping(); err != nil {
+		log.Fatalf("db ping failed: %v", err)
+	}
+
+	// Initialize repository
 	repo := repository.NewURLRepository(db)
-	generator := idgen.NewCounterGenerator(nil) // TODO: Pass Redis client
-	svc := service.NewURLService(repo, generator)
+
+	// ---------- Redis-backed Counter Generator ----------
+	// Make sure you have a function idgen.NewCounterGenerator(redisClient *redis.Client) *idgen.CounterGenerator
+	// that returns a type implementing idgen.Generator (i.e., has Generate() (string, error)).
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:        "localhost:6379",
+		DialTimeout: 5 * time.Second,
+		ReadTimeout: 3 * time.Second,
+	})
+
+	// Try pinging Redis so we fail fast if it's down
+	ctx := context.Background()
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		log.Fatalf("redis ping failed: %v", err)
+	}
+	defer func() {
+		_ = redisClient.Close()
+	}()
+
+	// Instantiate the generator (call the constructor, don't pass the constructor itself)
+	gen := idgen.NewCounterGenerator(redisClient) // must return a value that implements idgen.Generator
+
+	// ----------------------------------------------------
+
+	// Initialize service and handlers
+	svc := service.NewURLService(repo, gen, "http://localhost:8080", 10000)
 	handlers := handler.NewURLHandler(svc)
 
 	// Setup routes
