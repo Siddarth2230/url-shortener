@@ -22,8 +22,6 @@ type SnowflakeGenerator struct {
 }
 
 // NewSnowflakeGenerator creates a SnowflakeGenerator with given epoch (ms) and nodeID.
-// nodeID must fit in 10 bits (0..1023). If epoch==0, a sensible default is used:
-// example default epoch: 2020-01-01 00:00:00 UTC
 func NewSnowflakeGenerator(nodeID uint64, epochMs int64) (*SnowflakeGenerator, error) {
 	const (
 		nodeBits     = 10
@@ -51,7 +49,6 @@ func NewSnowflakeGenerator(nodeID uint64, epochMs int64) (*SnowflakeGenerator, e
 }
 
 // Generate returns a base62-encoded Snowflake ID (opaque short code).
-// Caller should be prepared to store and use these codes directly.
 func (s *SnowflakeGenerator) Generate() (string, error) {
 	const (
 		timestampBits = 41
@@ -91,7 +88,6 @@ func (s *SnowflakeGenerator) Generate() (string, error) {
 		((s.nodeID & s.maxNodeID) << sequenceBits) |
 		(s.sequence & s.maxSequence)
 
-	// encode to base62 for short human-safe code
 	code := Encode(id)
 	return code, nil
 }

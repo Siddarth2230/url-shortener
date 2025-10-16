@@ -20,11 +20,9 @@ func NewHashGenerator(nBytes int) (*HashGenerator, error) {
 // Generate creates short code by hashing the long URL (SHA256).
 func (g *HashGenerator) Generate(longURL string) (string, error) {
 	hash := sha256.Sum256([]byte(longURL))
-
-	var v uint64
 	buf := make([]byte, 8)
 	copy(buf[8-g.nBytes:], hash[:g.nBytes])
-	v = binary.BigEndian.Uint64(buf)
+	v := binary.BigEndian.Uint64(buf)
 
 	code := Encode(v)
 	return code, nil
