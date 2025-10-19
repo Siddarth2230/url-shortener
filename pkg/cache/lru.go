@@ -61,56 +61,64 @@ func (c *LRUCache) Put(key string, value interface{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// TODO: Implement this
-	// Steps:
-	// 1. If key exists, update value and move to front
-	// 2. If key is new:
-	//    a. Check if cache is full (len(cache) >= capacity)
-	//    b. If full, evict tail (removeNode + delete from map)
-	//    c. Create new node and add to front
-	//    d. Add to map
+	// If key exists, update value and move to front
+	if node, exists := c.cache[key]; exists {
+		node.Value = value
+		c.moveToFront(node)
+		return
+	}
+	// If key is new:
+	if len(c.cache) >= c.capacity {
+		c.evictTail()
+	}
+	// Create new node and add to front
+	newNode := &Node{
+		Key:   key,
+		Value: value,
+	}
+	c.addToFront(newNode)
+
+	// Add to map
+	c.cache[key] = newNode
 }
 
 // moveToFront moves a node to the head (most recent)
 func (c *LRUCache) moveToFront(node *Node) {
-	// TODO: Implement this
-	// Steps:
-	// 1. Remove node from current position (removeNode)
-	// 2. Add node to front (addToFront)
+	// Remove node from current position
+	c.removeNode(node)
+	// Add node to front (addToFront)
+	c.addToFront(node)
 }
 
 // removeNode removes a node from the list (doesn't delete from map)
 func (c *LRUCache) removeNode(node *Node) {
-	// TODO: Implement this
-	// Hint: Update prev and next pointers
-	// node.Prev.Next = ???
-	// node.Next.Prev = ???
+	node.Prev.Next = node.Next
+	node.Next.Prev = node.Prev
 }
 
 // addToFront adds a node right after the dummy head
 func (c *LRUCache) addToFront(node *Node) {
-	// TODO: Implement this
-	// Hint: Insert between head and head.Next
-	// node.Next = ???
-	// node.Prev = ???
-	// head.Next.Prev = ???
-	// head.Next = ???
+	HeadNext := c.head.Next
+
+	node.Next = HeadNext
+	node.Prev = c.head
+
+	c.head.Next = node
+	HeadNext.Prev = node
 }
 
 // evictTail removes the least recently used item
 func (c *LRUCache) evictTail() {
-	// TODO: Implement this
-	// Steps:
-	// 1. Get tail.Prev (actual last node, tail is dummy)
-	// 2. Remove from list
-	// 3. Delete from map
-}
+	lru := c.tail.Prev
 
-// Len returns current number of cached items
-func (c *LRUCache) Len() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.cache)
+	if lru == c.head {
+		return
+	}
+	// Delete from list
+	c.removeNode(lru)
+
+	// Delete from map
+	delete(c.cache, lru.Key)
 }
 
 // Clear empties the cache
@@ -120,4 +128,31 @@ func (c *LRUCache) Clear() {
 	c.cache = make(map[string]*Node, c.capacity)
 	c.head.Next = c.tail
 	c.tail.Prev = c.head
+}
+
+// Deletes a specific node
+func (c *LRUCache) Delete(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	node, exists := c.cache[key]
+	if !exists {
+		return false
+	}
+
+	c.removeNode(node)
+	delete(c.cache, key)
+	return true
+}
+
+// Peek retrieves value WITHOUT marking as recently used. Useful for checking cache without affecting eviction order
+func (c *LRUCache) Peek(key string) (interface{}, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	node, exists := c.cache[key]
+	if !exists {
+		return nil, false
+	}
+	return node.Value, true
 }

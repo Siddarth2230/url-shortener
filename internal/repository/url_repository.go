@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 
 	"github.com/Siddarth2230/url-shortener/internal/models"
@@ -48,6 +49,7 @@ func (r *URLRepository) FindByShortCode(ctx context.Context, shortCode string) (
 	var url models.URL
 	if err := row.Scan(&url.ID, &url.ShortCode, &url.LongURL, &url.CreatedAt, &expires_at); err != nil {
 		if err == sql.ErrNoRows {
+			log.Printf("No rows found for the given short code: %s", shortCode)
 			return nil, nil // Not found
 		}
 		log.Printf("Error finding URL by short code: %v", err)
@@ -68,4 +70,28 @@ func (r *URLRepository) ExistsByShortCode(ctx context.Context, shortCode string)
 		return false, err
 	}
 	return exists, nil
+}
+
+func (r *URLRepository) DeleteByShortCode(ctx context.Context, shortCode string) error {
+	query := `DELETE FROM urls WHERE short_code = $1`
+
+	result, err := r.db.ExecContext(ctx, query, shortCode)
+	if err != nil {
+		log.Printf("Error deleting short_code: %s with error: %v", shortCode, err)
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		log.Printf("Error fetching rows affected for short_code: %s: %v", shortCode, err)
+		return err
+	}
+
+	if rowsAffected == 0 {
+		log.Printf("No record found for short_code: %s", shortCode)
+		return fmt.Errorf("no record found for short_code: %s", shortCode)
+	}
+
+	log.Printf("Successfully deleted short_code: %s", shortCode)
+	return nil
 }
