@@ -14,57 +14,115 @@ import (
 	"github.com/Siddarth2230/url-shortener/internal/handler"
 	"github.com/Siddarth2230/url-shortener/internal/repository"
 	"github.com/Siddarth2230/url-shortener/internal/service"
+	"github.com/Siddarth2230/url-shortener/pkg/cache"
 	"github.com/Siddarth2230/url-shortener/pkg/idgen"
 )
 
 func main() {
-	// Connect to database
-	db, err := sql.Open("postgres", "postgres://urlshortener:localdev123@localhost/urlshortener?sslmode=disable")
+	ctx := context.Background()
+	// ============================================================
+	// CONNECT TO POSTGRESQL (Layer 3 - Database)
+	// ============================================================
+	log.Println("Connecting to PostgreSQL...")
+	db, err := sql.Open("postgres", "postgres://urlshortener:localdev123@localhost:5433/urlshortener?sslmode=disable")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to open database: %v", err)
 	}
 	defer db.Close()
 
-	// optional: ensure DB is reachable early
+	// Test DB connection
 	if err := db.Ping(); err != nil {
-		log.Fatalf("db ping failed: %v", err)
+		log.Fatalf("Database ping failed: %v", err)
 	}
+	log.Println("✓ PostgreSQL connected")
 
 	// Initialize repository
 	repo := repository.NewURLRepository(db)
 
-	// ---------- Redis-backed Counter Generator ----------
-	// Make sure you have a function idgen.NewCounterGenerator(redisClient *redis.Client) *idgen.CounterGenerator
-	// that returns a type implementing idgen.Generator (i.e., has Generate() (string, error)).
+	// ============================================================
+	// 2. CONNECT TO REDIS
+	// ============================================================
+	log.Println("Connecting to Redis...")
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:        "localhost:6379",
-		DialTimeout: 5 * time.Second,
-		ReadTimeout: 3 * time.Second,
+		Addr:         "localhost:6379",
+		Password:     "",
+		DB:           0,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 3 * time.Second,
 	})
+	defer redisClient.Close()
 
-	// Try pinging Redis so we fail fast if it's down
-	ctx := context.Background()
+	// Test Redis connection
 	if err := redisClient.Ping(ctx).Err(); err != nil {
-		log.Fatalf("redis ping failed: %v", err)
+		log.Fatalf("Redis ping failed: %v", err)
 	}
-	defer func() {
-		_ = redisClient.Close()
-	}()
+	log.Println("✓ Redis connected")
 
-	// Instantiate the generator (call the constructor, don't pass the constructor itself)
-	gen := idgen.NewCounterGenerator(redisClient) // must return a value that implements idgen.Generator
+	// ============================================================
+	// SETUP ID GENERATOR (uses Redis counter)
+	// ============================================================
+	gen := idgen.NewCounterGenerator(redisClient)
+	log.Println("✓ ID Generator initialized (Counter-based)")
 
-	// ----------------------------------------------------
+	// ============================================================
+	// SETUP TWO-LAYER CACHE
+	// ============================================================
 
-	// Initialize service and handlers
-	svc := service.NewURLService(repo, gen, "http://localhost:8080", 10000)
+	// Layer 2: Redis cache (shared across all servers)
+	redisCacheTTL := 5 * time.Minute
+	redisCache := cache.NewRedisCache(redisClient, redisCacheTTL)
+	log.Printf("✓ Layer 2 Cache (Redis) initialized (TTL: %v)", redisCacheTTL)
+
+	// Layer 1: LRU cache is created by default
+	l1CacheSize := 10000
+	log.Printf("✓ Layer 1 Cache (LRU) will be initialized (Capacity: %d)", l1CacheSize)
+
+	// ============================================================
+	// INITIALIZE SERVICE WITH TWO-LAYER CACHE
+	// ============================================================
+	baseURL := "http://localhost:8080"
+
+	svc := service.NewURLServiceWithRedis(
+		repo,
+		gen,
+		baseURL,
+		l1CacheSize,
+		redisCache,
+	)
+	log.Println("✓ URL Service initialized with TWO-LAYER caching")
+
+	// ============================================================
+	// SETUP HTTP HANDLERS
+	// ============================================================
 	handlers := handler.NewURLHandler(svc)
 
 	// Setup routes
 	r := mux.NewRouter()
+
+	// API endpoints
 	r.HandleFunc("/shorten", handlers.ShortenURL).Methods("POST")
 	r.HandleFunc("/{shortCode}", handlers.RedirectURL).Methods("GET")
 
+	// Health check endpoint
+	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application-json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"healthy"}`))
+	}).Methods("GET")
+
+	// ============================================================
+	// START HTTP SERVER
+	// ============================================================
+
+	addr := ":8080"
+	log.Printf("🚀 Server starting on %s", addr)
+	log.Printf("   POST %s/shorten    - Create short URL", baseURL)
+	log.Printf("   GET  %s/{code}     - Redirect to long URL", baseURL)
+	log.Printf("   GET  %s/health     - Health check", baseURL)
 	log.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", r))
+
+	if err := http.ListenAndServe(addr, r); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
 }
