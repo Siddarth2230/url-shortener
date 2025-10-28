@@ -156,3 +156,7 @@ func (c *LRUCache) Peek(key string) (interface{}, bool) {
 	}
 	return node.Value, true
 }
+
+func (c *LRUCache) Len() int {
+	return len(c.cache)
+}

@@ -14,6 +14,7 @@ import (
 	"github.com/Siddarth2230/url-shortener/internal/repository"
 	"github.com/Siddarth2230/url-shortener/pkg/cache"
 	"github.com/Siddarth2230/url-shortener/pkg/idgen"
+	"github.com/Siddarth2230/url-shortener/pkg/metrics"
 	"github.com/jackc/pgconn"
 	"github.com/lib/pq"
 )
@@ -28,34 +29,31 @@ var (
 
 // URLService provides URL shortening and lookup.
 type URLService struct {
-	repo          *repository.URLRepository
-	generator     idgen.Generator
-	BaseURL       string // set to produce absolute short URLs
-	l1Cache       *cache.LRUCache
-	l2Cache       *cache.RedisCache
-	enableL2Cache bool
+	repo      *repository.URLRepository
+	generator idgen.Generator
+	BaseURL   string // set to produce absolute short URLs
+	l1Cache   *cache.LRUCache
+	l2Cache   *cache.RedisCache
 }
 
 func NewURLService(repo *repository.URLRepository, gen idgen.Generator, baseURL string, cacheSize int) *URLService {
 	return &URLService{
-		repo:          repo,
-		generator:     gen,
-		BaseURL:       baseURL,
-		l1Cache:       cache.NewLRUCache(cacheSize),
-		l2Cache:       nil,
-		enableL2Cache: false,
+		repo:      repo,
+		generator: gen,
+		BaseURL:   baseURL,
+		l1Cache:   cache.NewLRUCache(cacheSize),
+		l2Cache:   nil,
 	}
 }
 
 // NewURLServiceWithRedis creates a URL service with both L1 and L2 caches
 func NewURLServiceWithRedis(repo *repository.URLRepository, gen idgen.Generator, baseURL string, l1CacheSize int, redisCache *cache.RedisCache) *URLService {
 	return &URLService{
-		repo:          repo,
-		generator:     gen,
-		BaseURL:       baseURL,
-		l1Cache:       cache.NewLRUCache(l1CacheSize),
-		l2Cache:       redisCache,
-		enableL2Cache: redisCache != nil,
+		repo:      repo,
+		generator: gen,
+		BaseURL:   baseURL,
+		l1Cache:   cache.NewLRUCache(l1CacheSize),
+		l2Cache:   redisCache,
 	}
 }
 
@@ -149,6 +147,7 @@ func (s *URLService) GetLongURL(ctx context.Context, shortCode string) (string, 
 
 	// ===== CACHE LAYER (L1) =====
 	if cached, ok := s.l1Cache.Get(shortCode); ok {
+		metrics.CacheHits.WithLabelValues("l1").Inc()
 		// Cache hit!
 		if url, ok := cached.(*models.URL); ok {
 			// Check expiry
@@ -156,19 +155,21 @@ func (s *URLService) GetLongURL(ctx context.Context, shortCode string) (string, 
 				s.invalidateCache(ctx, shortCode)
 				return "", ErrExpired
 			}
+			metrics.CacheSize.WithLabelValues("l1").Set(float64(s.l1Cache.Len()))
 			return url.LongURL, nil
 		}
 	}
+	metrics.CacheMisses.WithLabelValues("l1").Inc()
 
 	// ===== CACHE LAYER (L2) =====
-	if s.enableL2Cache && s.l2Cache != nil {
+	if s.l2Cache != nil {
 		var cachedURL models.URL
-		cacheKey := fmt.Sprintf("url:%s", shortCode)
+		cacheKey := shortCode
 
 		err := s.l2Cache.Get(ctx, cacheKey, &cachedURL)
 		if err == nil {
 			// L2 cache hit
-
+			metrics.CacheHits.WithLabelValues("l2").Inc()
 			if cachedURL.ExpiresAt != nil && time.Now().UTC().After(*cachedURL.ExpiresAt) {
 				s.invalidateCache(ctx, shortCode)
 				return "", ErrExpired
@@ -182,6 +183,7 @@ func (s *URLService) GetLongURL(ctx context.Context, shortCode string) (string, 
 		if !errors.Is(err, cache.ErrCacheMiss) {
 			log.Printf("Redis error for key %s: %v", cacheKey, err)
 		}
+		metrics.CacheMisses.WithLabelValues("l2").Inc()
 	}
 
 	// L2 Cache miss - continue to database
@@ -189,8 +191,9 @@ func (s *URLService) GetLongURL(ctx context.Context, shortCode string) (string, 
 	// ============================================================
 	// LAYER 3: Query Database (PostgreSQL) - SLOWEST
 	// ============================================================
-
+	dbStart := time.Now()
 	u, err := s.repo.FindByShortCode(ctx, shortCode)
+	metrics.DatabaseQueryDuration.WithLabelValues("find").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
 		return "", err
 	}
@@ -216,11 +219,11 @@ func (s *URLService) cacheURL(ctx context.Context, shortCode string, u *models.U
 	s.l1Cache.Put(shortCode, u)
 
 	// L2: Redis cache (asynchronous to not block response)
-	if s.enableL2Cache && s.l2Cache != nil {
+	if s.l2Cache != nil {
 		go func() {
 			// Use background context to avoid cancellation
 			bgCtx := context.Background()
-			cacheKey := fmt.Sprintf("url:%s", shortCode)
+			cacheKey := shortCode
 
 			err := s.l2Cache.SetWithTTL(bgCtx, cacheKey, u, ttl)
 			if err != nil {
@@ -240,10 +243,11 @@ func (s *URLService) cacheNotFound(ctx context.Context, shortCode string) {
 
 	s.l1Cache.Put(shortCode, notFoundMarker)
 
-	if s.enableL2Cache && s.l2Cache != nil {
+	if s.l2Cache != nil {
 		go func() {
+			// Use background context so caching is not canceled if request ends.
 			bgCtx := context.Background()
-			cacheKey := fmt.Sprintf("url:%s", shortCode)
+			cacheKey := shortCode
 			s.l2Cache.SetWithTTL(bgCtx, cacheKey, notFoundMarker, 1*time.Minute)
 		}()
 	}
@@ -255,10 +259,11 @@ func (s *URLService) invalidateCache(ctx context.Context, shortCode string) {
 	s.l1Cache.Delete(shortCode)
 
 	// L2: Remove from Redis (affects all servers)
-	if s.enableL2Cache && s.l2Cache != nil {
+	if s.l2Cache != nil {
 		go func() {
+			// Use background context so caching is not canceled if request ends.
 			bgCtx := context.Background()
-			cacheKey := fmt.Sprintf("url:%s", shortCode)
+			cacheKey := shortCode
 			err := s.l2Cache.Delete(bgCtx, cacheKey)
 			if err != nil {
 				log.Printf("Failed to invalidate cache in Redis (key=%s): %v", cacheKey, err)

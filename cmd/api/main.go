@@ -5,13 +5,16 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/Siddarth2230/url-shortener/internal/handler"
+	"github.com/Siddarth2230/url-shortener/internal/middleware"
 	"github.com/Siddarth2230/url-shortener/internal/repository"
 	"github.com/Siddarth2230/url-shortener/internal/service"
 	"github.com/Siddarth2230/url-shortener/pkg/cache"
@@ -28,12 +31,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
-	defer db.Close()
 
 	// Test DB connection
 	if err := db.Ping(); err != nil {
+		db.Close()
 		log.Fatalf("Database ping failed: %v", err)
 	}
+	defer db.Close()
 	log.Println("✓ PostgreSQL connected")
 
 	// Initialize repository
@@ -81,7 +85,7 @@ func main() {
 	// ============================================================
 	// INITIALIZE SERVICE WITH TWO-LAYER CACHE
 	// ============================================================
-	baseURL := "http://localhost:8080"
+	baseURL := getEnv("BASE_URL", "http://localhost:8080")
 
 	svc := service.NewURLServiceWithRedis(
 		repo,
@@ -100,16 +104,22 @@ func main() {
 	// Setup routes
 	r := mux.NewRouter()
 
+	// Apply metrics middleware to all routes
+	r.Use(middleware.MetricsMiddleware)
+
 	// API endpoints
 	r.HandleFunc("/shorten", handlers.ShortenURL).Methods("POST")
 	r.HandleFunc("/{shortCode}", handlers.RedirectURL).Methods("GET")
 
 	// Health check endpoint
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application-json")
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"healthy"}`))
 	}).Methods("GET")
+
+	// Metrics endpoint
+	r.Handle("/metrics", promhttp.Handler()).Methods("GET")
 
 	// ============================================================
 	// START HTTP SERVER
@@ -125,4 +135,11 @@ func main() {
 	if err := http.ListenAndServe(addr, r); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }
